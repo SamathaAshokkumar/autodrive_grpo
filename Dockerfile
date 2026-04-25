@@ -46,4 +46,4 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
 
 EXPOSE 8000
 
-CMD ["sh", "-c", "cd /app/env && python -m autodrive_env.server.app --host ${HOST} --port ${PORT}"]
+CMD ["sh", "-c", "cd /app/env && python grpo_ui.py"]
