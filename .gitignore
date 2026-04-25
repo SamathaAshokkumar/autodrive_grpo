@@ -1,0 +1,4 @@
+echo wandb/ >> .gitignore
+echo *.png >> .gitignore
+echo outputs/ >> .gitignore
+echo *.wandb >> .gitignore
