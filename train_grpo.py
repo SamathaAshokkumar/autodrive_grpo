@@ -61,9 +61,11 @@ from trl.experimental.openenv import generate_rollout_completions
 try:
     from autodrive_env import AutoDriveGymEnvironment
     from autodrive_env.models import AutoDriveAction, AutoDriveObservation
+    from autodrive_env.server.reward_tracker import RewardTracker
 except ImportError:
     from . import AutoDriveGymEnvironment
     from .models import AutoDriveAction, AutoDriveObservation
+    from .server.reward_tracker import RewardTracker
 
 
 logging.basicConfig(
@@ -475,29 +477,84 @@ def main() -> None:
     out = Path(args.output_dir or f"outputs/autodrive-grpo-{model_slug}-{ts}")
     out.mkdir(parents=True, exist_ok=True)
 
-    # ── Reward CSV logger ─────────────────────────────────────────────────────
+    # ── Reward CSV logger + RewardTracker + live-state ────────────────────────
     reward_log = out / args.reward_log
     episode_counter = [0]
     all_rewards: list[float] = []
+    all_successes: list[int] = []
+    tracker = RewardTracker(log_path=str(out / "reward_log.json"))
+    # Root copies so grpo_ui.py and /grpo/metrics can find data without
+    # knowing the timestamped output directory path.
+    _root_json  = Path("reward_log.json")
+    _live_state = Path("live_state.json")
 
     with open(reward_log, "w", newline="") as f:
         csv.writer(f).writerow(["episode", "total_reward", "success", "steps", "timestamp"])
 
-    def _log(total_r: float, success: bool, steps: int) -> None:
-        episode_counter[0] += 1
+    def _log(total_r: float, success: bool, steps: int, scenario_type: str = "grpo_episode") -> None:
+        ep = episode_counter[0] + 1
+        episode_counter[0] = ep
         all_rewards.append(total_r)
+        all_successes.append(int(success))
+
+        # ── CSV ──────────────────────────────────────────────────────────────
         with open(reward_log, "a", newline="") as f:
-            csv.writer(f).writerow([
-                episode_counter[0], total_r, int(success), steps,
-                datetime.now().isoformat(),
-            ])
-        n = len(all_rewards)
+            csv.writer(f).writerow(
+                [ep, total_r, int(success), steps, datetime.now().isoformat()]
+            )
+
+        # ── RewardTracker ────────────────────────────────────────────────────
+        diff = min(0.85, 0.15 + (ep / max(args.episodes, 1)) * 0.70)
+        tier = (
+            "warmup"       if diff < 0.25 else
+            "beginner"     if diff < 0.45 else
+            "intermediate" if diff < 0.60 else
+            "advanced"     if diff < 0.75 else
+            "expert"
+        )
+        tracker.start_episode(ep, f"grpo_ep_{ep}", scenario_type, diff, tier)
+        tracker.end_episode(success=success, cumulative_reward=total_r)
+
+        # Flush JSON to output dir AND root (overwrites every episode so
+        # grpo_ui.py always has the latest data without waiting for training
+        # to finish).
+        curves      = tracker.get_curves()
+        curves_text = json.dumps(curves)
+        try:
+            (out / "reward_log.json").write_text(curves_text)
+        except Exception:
+            pass
+        try:
+            _root_json.write_text(curves_text)
+        except Exception:
+            pass
+
+        # ── live_state.json (dashboard + grpo_ui.py) ─────────────────────────
+        n   = len(all_rewards)
         m10 = sum(all_rewards[-10:]) / min(n, 10)
+        live = {
+            "mode":           "grpo",
+            "episode":        ep,
+            "total_episodes": args.episodes,
+            "last_reward":    round(total_r, 4),
+            "mean_10":        round(m10,     4),
+            "best":           round(max(all_rewards), 4),
+            "success_rate":   round(sum(all_successes[-10:]) / min(len(all_successes), 10), 3),
+            "difficulty":     round(diff, 3),
+            "tier":           tier,
+            "model":          args.model_id,
+            "timestamp":      datetime.now().isoformat(),
+        }
+        try:
+            _live_state.write_text(json.dumps(live, indent=2))
+        except Exception:
+            pass
+
         logger.info(
             "Episode %3d: reward=%.3f  success=%s  steps=%d | "
-            "mean(10)=%.3f  best=%.3f",
-            episode_counter[0], total_r, "✅" if success else "❌", steps,
-            m10, max(all_rewards),
+            "mean(10)=%.3f  best=%.3f  diff=%.2f",
+            ep, total_r, "✅" if success else "❌", steps,
+            m10, max(all_rewards), diff,
         )
 
     # ── GRPOConfig ────────────────────────────────────────────────────────────
@@ -551,12 +608,27 @@ def main() -> None:
         successes: list[bool] = []
 
         for _ in prompts:
+            # ── Curriculum difficulty scaling ─────────────────────────────
+            # Smoothly ramp difficulty from warmup (0.15) to advanced (0.85)
+            # over the full training run, then propagate to the env's curriculum.
+            ep_idx = episode_counter[0]  # episodes completed so far
+            target_diff = min(0.85, 0.15 + (ep_idx / max(args.episodes - 1, 1)) * 0.70)
+            from autodrive_env.server.curriculum import DIFFICULTY_TIERS as _DT
+            tier_idx = len(_DT) - 1
+            for _i, _t in enumerate(_DT):
+                if target_diff <= _t["max_diff"]:
+                    tier_idx = _i
+                    break
+            env.curriculum._tier_index = tier_idx
+
             ep = rollout_once(trainer, env, tokenizer, args.max_turns)
             all_prompt_ids.append(ep["prompt_ids"])
             all_completion_ids.append(ep["completion_ids"])
             all_logprobs.append(ep["logprobs"])
             total_rewards.append(ep["total_reward"])
             successes.append(ep["success"])
+            # Record curriculum advancement from this episode's outcome
+            env.curriculum.record("grpo_episode", ep["success"], ep["steps"], ep["total_reward"])
             _log(ep["total_reward"], ep["success"], ep["steps"])
 
         return {

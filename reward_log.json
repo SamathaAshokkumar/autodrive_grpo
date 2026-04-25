@@ -1,46 +1,61 @@
 {
-  "episode_count": 5,
+  "episode_count": 8,
   "reward_curve": [
     6.04,
     16.277,
     13.608,
     11.193,
-    5.662
+    5.662,
+    18.561,
+    13.667,
+    14.282
   ],
   "rolling_10_curve": [
     6.04,
     11.1585,
     11.975,
     11.7795,
-    10.556
+    10.556,
+    11.8902,
+    12.144,
+    12.4113
   ],
   "rolling_20_curve": [
     6.04,
     11.1585,
     11.975,
     11.7795,
-    10.556
+    10.556,
+    11.8902,
+    12.144,
+    12.4113
   ],
   "success_curve": [
     1,
     1,
     1,
     0,
-    1
+    1,
+    0,
+    1,
+    0
   ],
   "difficulty_curve": [
     0.15,
     0.15,
     0.15,
     0.25,
-    0.162
+    0.162,
+    0.25,
+    0.15,
+    0.25
   ],
   "overall": {
-    "mean_reward": 10.556,
-    "max_reward": 16.277,
+    "mean_reward": 12.4113,
+    "max_reward": 18.561,
     "min_reward": 5.662,
-    "mean_success_rate": 0.8,
-    "final_10_mean": 10.556
+    "mean_success_rate": 0.625,
+    "final_10_mean": 12.4113
   },
   "by_scenario": {
     "pedestrian_crossing": {
@@ -54,25 +69,30 @@
       "success_rate": 1.0
     },
     "bike_blind_spot": {
-      "episodes": 1,
-      "mean_reward": 13.608,
+      "episodes": 2,
+      "mean_reward": 13.6375,
       "success_rate": 1.0
     },
     "pothole_ahead": {
+      "episodes": 2,
+      "mean_reward": 12.7375,
+      "success_rate": 0.0
+    },
+    "speed_breaker": {
       "episodes": 1,
-      "mean_reward": 11.193,
+      "mean_reward": 18.561,
       "success_rate": 0.0
     }
   },
   "tier_progression": {
     "warmup": {
-      "episodes": 5,
-      "mean_reward": 10.556
+      "episodes": 8,
+      "mean_reward": 12.4113
     }
   },
   "pipeline_impact": {
     "with_pipeline_mean": 0.0,
-    "without_pipeline_mean": 10.556,
+    "without_pipeline_mean": 12.4113,
     "pipeline_episodes": 0
   },
   "episodes": [
@@ -147,6 +167,51 @@
       "steps": 8,
       "mean_step_reward": 0.7077,
       "timestamp": 1777130449.446023,
+      "pipeline_used": false,
+      "route_mode": false,
+      "route_progress_pct": 0.0
+    },
+    {
+      "episode": 6,
+      "episode_id": "7745776c-b3ae-4ab2-bd06-c84f27a0751e",
+      "scenario_type": "speed_breaker",
+      "difficulty": 0.25,
+      "tier": "warmup",
+      "success": false,
+      "total_reward": 18.561,
+      "steps": 21,
+      "mean_step_reward": 0.8839,
+      "timestamp": 1777130942.5210185,
+      "pipeline_used": false,
+      "route_mode": false,
+      "route_progress_pct": 0.0
+    },
+    {
+      "episode": 7,
+      "episode_id": "60ac8bdc-f7bb-4fa1-8e48-30270d86c9f1",
+      "scenario_type": "bike_blind_spot",
+      "difficulty": 0.15,
+      "tier": "warmup",
+      "success": true,
+      "total_reward": 13.666999999999998,
+      "steps": 15,
+      "mean_step_reward": 0.9111,
+      "timestamp": 1777132235.908864,
+      "pipeline_used": false,
+      "route_mode": false,
+      "route_progress_pct": 0.0
+    },
+    {
+      "episode": 8,
+      "episode_id": "dd94e2bf-4fe4-4afd-97b4-1347bf6ff428",
+      "scenario_type": "pothole_ahead",
+      "difficulty": 0.25,
+      "tier": "warmup",
+      "success": false,
+      "total_reward": 14.282,
+      "steps": 21,
+      "mean_step_reward": 0.6801,
+      "timestamp": 1777133259.7753277,
       "pipeline_used": false,
       "route_mode": false,
       "route_progress_pct": 0.0

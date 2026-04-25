@@ -296,6 +296,86 @@ async def metrics_summary():
     }
 
 
+@app.get("/grpo/metrics")
+async def grpo_metrics():
+    """Return GRPO fine-tuning reward curves written by train_grpo.py.
+
+    Reads the root ``reward_log.json`` that train_grpo.py flushes after every
+    episode, so this endpoint always reflects the latest GRPO training state
+    without requiring a server restart.
+
+    Response fields:
+      episode_count   — how many GRPO training episodes have completed
+      reward_curve    — per-episode total reward
+      rolling_10      — rolling-10 average (smoothed trend)
+      success_curve   — per-episode success flag (0/1)
+      overall         — best, mean, final-10-mean, success rate
+      live_state      — latest live_state.json snapshot if available
+                        (includes mode, difficulty, tier, model name)
+    """
+    import os as _os
+    _root_json  = _os.path.join(_os.path.dirname(__file__), "..", "reward_log.json")
+    _live_state = _os.path.join(_os.path.dirname(__file__), "..", "live_state.json")
+
+    curves = RewardTracker.load(log_path=_root_json)
+    if "error" in curves:
+        # Fallback: search for the latest timestamped output CSV
+        import glob as _glob
+        csvs = sorted(
+            _glob.glob(_os.path.join(_os.path.dirname(__file__), "..", "outputs",
+                                     "autodrive-grpo-*", "reward_log.csv")),
+            reverse=True,
+        )
+        if csvs:
+            import csv as _csv
+            rewards_raw: list[float] = []
+            successes_raw: list[int] = []
+            try:
+                with open(csvs[0], newline="") as _f:
+                    _reader = _csv.reader(_f)
+                    next(_reader, None)
+                    for row in _reader:
+                        if len(row) >= 3:
+                            rewards_raw.append(float(row[1]))
+                            successes_raw.append(int(row[2]))
+            except Exception as _exc:
+                return {"status": "error", "error": str(_exc)}
+            n  = len(rewards_raw)
+            m  = sum(rewards_raw) / max(n, 1)
+            f10 = sum(rewards_raw[-10:]) / max(min(n, 10), 1)
+            curves = {
+                "episode_count":   n,
+                "reward_curve":    [round(r, 4) for r in rewards_raw],
+                "rolling_10_curve": [],
+                "success_curve":   successes_raw,
+                "overall": {
+                    "mean_reward":    round(m, 4),
+                    "max_reward":     round(max(rewards_raw, default=0.0), 4),
+                    "final_10_mean":  round(f10, 4),
+                    "mean_success_rate": round(sum(successes_raw) / max(n, 1), 3),
+                },
+                "source": csvs[0],
+            }
+        else:
+            return {
+                "status": "no_data",
+                "message": (
+                    "No GRPO training data found. "
+                    "Run `python train_grpo.py --episodes 50` to generate it."
+                ),
+            }
+
+    # Attach live_state snapshot if available
+    live = {}
+    try:
+        with open(_live_state) as _f:
+            live = json.load(_f)
+    except Exception:
+        pass
+
+    return {"status": "ok", "grpo_metrics": curves, "live_state": live}
+
+
 
 # ── Live training demo ─────────────────────────────────────────────────────────
 
