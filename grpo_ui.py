@@ -79,6 +79,13 @@ _ALGORITHM_LABEL = "Q-learning (PolicyLearner / Q-table)"
 # GRPO training script uses Qwen3 + TRL, labelled separately in UI
 _GRPO_ALGO_LABEL = "GRPO (Qwen3 fine-tuning via TRL)"
 
+# ---------------------------------------------------------------------------
+# Logging verbosity toggle
+# VERBOSE_LOGGING = True  → full episode-by-episode chatter (development/debug)
+# VERBOSE_LOGGING = False → silent except warnings/errors (demo / hackathon)
+# ---------------------------------------------------------------------------
+VERBOSE_LOGGING: bool = True
+
 SCENARIO_TYPES = [
     "pedestrian_crossing", "auto_cut_in", "bike_blind_spot",
     "pothole_ahead", "speed_breaker", "crowded_market",
@@ -309,7 +316,7 @@ def _background_training_loop(state: _TrainingState) -> None:
     baseline_env = AutoDriveGymEnvironment()
     ep_count     = 0
 
-    logger.info("[BG] Continuous training loop started.")
+    logger.info("[AUTO-DRIVE][BG-TRAIN] Continuous training loop started.")
     while not state._stop_event.is_set():
         with state.lock:
             diff   = state.bg_difficulty
@@ -355,9 +362,20 @@ def _background_training_loop(state: _TrainingState) -> None:
         # Checkpoint disk write OUTSIDE the lock -- never block the UI
         if new_best and state.best_ckpt:
             _write_checkpoint_async(state.best_ckpt)
-        ep_count += 1
 
-    logger.info("[BG] Continuous training loop stopped after %d episodes.", ep_count)
+        if VERBOSE_LOGGING:
+            logger.info(
+                "[CURRICULUM] scenario=%s success=%s reward=%.3f -> difficulty=%.2f",
+                stype or "unknown", success, reward, curr_diff,
+            )
+        ep_count += 1
+        if VERBOSE_LOGGING and ep_count % 5 == 0:
+            logger.info(
+                "[BG-TRAIN] episodes=%d latest_reward=%.3f epsilon=%.3f difficulty=%.2f",
+                ep_count, reward, state.learner._epsilon, curr_diff,
+            )
+
+    logger.info("[AUTO-DRIVE][BG-TRAIN] Continuous training loop stopped after %d episodes.", ep_count)
 
 
 # ---------------------------------------------------------------------------
@@ -503,6 +521,18 @@ def _run_episode(
     if learner is not None:
         learner.record_validation(collision=bool(collision), near_miss=bool(near_miss))
         learner.end_episode(success, total_reward, scenario_type)
+
+    if VERBOSE_LOGGING:
+        logger.info(
+            "[EPISODE] ep=%d scenario=%s reward=%.3f success=%s collision=%s near_miss=%s steps=%d",
+            episode_num, scenario_type, total_reward, success,
+            bool(collision), bool(near_miss), len(action_log),
+        )
+        if not success:
+            logger.warning(
+                "[FAIL] ep=%d scenario=%s reward=%.3f collision=%s near_miss=%s",
+                episode_num, scenario_type, total_reward, bool(collision), bool(near_miss),
+            )
 
     return total_reward, success, collision, near_miss, rule_violation, action_log, scenario_type
 
@@ -1336,18 +1366,45 @@ def build_ui() -> gr.Blocks:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    # -----------------------------------------------------------------------
+    # Logging: prefer colorlog for coloured output; fall back to plain text.
+    # Failures = red, WARN = yellow, INFO = green, so training signal pops.
+    # -----------------------------------------------------------------------
+    try:
+        import colorlog  # optional dep -- `pip install colorlog`
+        _ch = colorlog.StreamHandler()
+        _ch.setFormatter(colorlog.ColoredFormatter(
+            "%(log_color)s%(asctime)s %(levelname)s %(message)s",
+            datefmt="%H:%M:%S",
+            log_colors={
+                "DEBUG":    "cyan",
+                "INFO":     "green",
+                "WARNING":  "yellow",
+                "ERROR":    "red",
+                "CRITICAL": "bold_red",
+            },
+        ))
+        logging.root.setLevel(logging.INFO)
+        logging.root.addHandler(_ch)
+    except ImportError:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s %(levelname)s %(message)s",
+            datefmt="%H:%M:%S",
+        )
+
     parser = argparse.ArgumentParser(description="AutoDrive Gym -- Training Lab UI")
-    parser.add_argument("--share",      action="store_true",  help="Create public Gradio link")
-    parser.add_argument("--port",       type=int, default=7860)
-    parser.add_argument("--server",     default="0.0.0.0")
-    parser.add_argument("--no-browser", action="store_true")
+    parser.add_argument("--share",   action="store_true", help="Create public Gradio link")
+    parser.add_argument("--port",    type=int, default=7860)
+    parser.add_argument("--server",  default="0.0.0.0")
+    parser.add_argument("--verbose", action="store_true", help="Override VERBOSE_LOGGING at runtime")
     args = parser.parse_args()
 
+    global VERBOSE_LOGGING
+    if args.verbose:
+        VERBOSE_LOGGING = True
+
+    logger.info("[AUTO-DRIVE][INIT] AutoDrive Training Lab starting on http://%s:%d", args.server, args.port)
     demo = build_ui()
     # Build theme safely -- older Gradio versions may not have all attributes
     _theme = None
@@ -1359,14 +1416,17 @@ def main() -> None:
         )
     except Exception:
         pass
+    # inbrowser is intentionally omitted: headless containers (HF Spaces, Docker)
+    # have no display to open.  Gradio 6 also removed/deprecated this parameter.
     launch_kwargs: dict = dict(
         server_name=args.server,
         server_port=args.port,
         share=args.share,
-        inbrowser=not args.no_browser,
     )
     if _theme is not None:
         launch_kwargs["theme"] = _theme
+    logger.info("[AUTO-DRIVE][INIT] Launching Gradio -- server_name=%s server_port=%d share=%s",
+                args.server, args.port, args.share)
     demo.launch(**launch_kwargs)
 
 

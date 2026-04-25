@@ -14,7 +14,6 @@ dependencies = [
     "fastapi",
     "uvicorn",
     "pydantic",
-    "matplotlib",
 ]
 
 [project.optional-dependencies]
@@ -23,6 +22,18 @@ train = [
     "peft",
     "transformers",
     "datasets",
+]
+grpo = [
+    "torch",
+    "trl>=0.29.0",
+    "peft>=0.10.0",
+    "transformers>=4.40.0",
+    "datasets>=2.18.0",
+    "vllm>=0.4.0",
+    "accelerate>=0.29.0",
+    "matplotlib",
+    "numpy",
+    "colorlog",
 ]
 dev = [
     "pytest>=8.0.0",
