@@ -1395,7 +1395,7 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="AutoDrive Gym -- Training Lab UI")
     parser.add_argument("--share",   action="store_true", help="Create public Gradio link")
-    parser.add_argument("--port",    type=int, default=7860)
+    parser.add_argument("--port",    type=int, default=8000)
     parser.add_argument("--server",  default="0.0.0.0")
     parser.add_argument("--verbose", action="store_true", help="Override VERBOSE_LOGGING at runtime")
     args = parser.parse_args()
