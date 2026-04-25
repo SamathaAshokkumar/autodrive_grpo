@@ -1,4 +1,21 @@
-echo wandb/ >> .gitignore
-echo *.png >> .gitignore
-echo outputs/ >> .gitignore
-echo *.wandb >> .gitignore
+# wandb logs
+wandb/
+
+# outputs
+outputs/
+
+# images
+*.png
+*.jpg
+*.jpeg
+
+# python cache
+__pycache__/
+*.pyc
+
+# env
+env/
+openenv/
+
+# logs
+*.log

@@ -1,12 +1,10 @@
-
-
 ---
-title: AutoDrive GRPO
-emoji: 🚗
+title: autodrive
 colorFrom: blue
 colorTo: green
 sdk: docker
 app_port: 8000
+pinned: false
 ---
 
 # AutoDrive Gym — Autonomous Driving in Indian Road Conditions
@@ -364,6 +362,72 @@ Three modules work together:
 ```bash
 python train.py --mode adaptive --episodes 50
 ```
+
+---
+
+## GRPO Fine-tuning — Teaching Qwen3 to Drive
+
+Beyond the Q-table, AutoDrive Gym includes a full **GRPO fine-tuning pipeline** using [HF TRL](https://github.com/huggingface/trl) — the same algorithm behind DeepSeek-R1 and QwQ.
+
+Instead of a lookup table, the model itself (Qwen3-0.6B or larger) generates driving decisions as JSON text. GRPO fine-tunes it directly on Indian-road driving episodes — no human labels, no separate reward model, just the gym as the training signal.
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              GRPO TRAINING LOOP                              │
+│                                                              │
+│  ┌──────────┐  ┌────────────────┐  ┌──────────────┐  │
+│  │ Indian   │  │ Qwen3 + LoRA    │  │AutoDrive Gym│  │
+│  │ Scenario │►│ generates JSON  │►│ step reward  │  │
+│  │ (env)    │  │ action          │  │ (0–1 per step)│  │
+│  └──────────┘  └────────────────┘  └──────┐───────┘  │
+│                                                │           │
+│  ◄── GRPO gradient update (8 rollouts) ───────┘           │
+│                                                            │
+│  Curriculum: warmup (0.15) → intermediate → expert (0.85)  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Reward Structure
+
+Beyond the per-step environment reward, three additional signals produce the variance GRPO needs:
+
+| Signal | Effect |
+|--------|--------|
+| Repeat-action penalty (-0.12 / -0.20) | Prevents the model looping `brake` indefinitely |
+| Phase-order bonus (+0.08 / +0.10) | Rewards braking near hazard, accelerating once cleared |
+| Resolution bonus (+1.0 to +3.0) | Faster success earns higher bonus (efficiency-scaled) |
+| Timeout floor (-2.0) | Failed episodes produce strong, clean negative signal |
+
+This creates clear signal separation: successful fast episodes score **+3 to +8**, failed episodes score **-2.0**.
+
+### GPU Requirements
+
+| VRAM | Recommended model | LoRA rank |
+|------|-------------------|-----------|
+| 8 GB | `Qwen/Qwen3-0.6B` | r=8 |
+| 16 GB | `Qwen/Qwen3-1.7B` | r=16 (HF T4 default) |
+| 24 GB | `Qwen/Qwen3-4B` | r=16 |
+| 40–80 GB | `Qwen/Qwen2.5-7B-Instruct` | r=32 |
+
+### Quick Start (two terminals)
+
+```bash
+# Terminal 1: start the environment server
+uvicorn autodrive_env.server.app:app --host 0.0.0.0 --port 8000
+
+# Terminal 2: run GRPO training  (GPU required)
+pip install -e ".[grpo]"
+python train_grpo.py --episodes 50 --model-id Qwen/Qwen3-0.6B
+
+# Optional: push fine-tuned checkpoint to HF Hub
+python train_grpo.py --episodes 50 --push-to-hub --hub-repo your-name/autodrive-agent
+```
+
+Live metrics are written to `reward_log.json` and `live_state.json` every episode. The Training Lab UI (`python grpo_ui.py`) reads these in real time from the **GRPO** tab.
+
+### Why GRPO over PPO
+
+PPO requires a value function — an estimate of how good a state is. For Indian road driving, this is hard to learn because the same state (`hazard at 15 m`) can be correct to brake or accelerate depending on 3 steps of context. GRPO sidesteps this by running **8 parallel rollouts of the same scenario** and comparing outcomes directly. No value network. Better suited for the context-dependent, delayed rewards in this domain.
 
 ---
 

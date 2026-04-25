@@ -221,6 +221,55 @@ All 7 graded tasks available at `/tasks`. Full baseline scores at `/baseline`.
 
 ---
 
+## Going Further: GRPO Fine-tuning
+
+The Q-learning agent is a useful baseline — fast, no GPU, trains in seconds. But it cannot generalize to scenarios it has never seen, and it cannot explain its decisions.
+
+For the second training track, we added **GRPO fine-tuning** — the same algorithm behind DeepSeek-R1 and QwQ.
+
+The idea is simple: instead of a lookup table, the model itself (Qwen3-0.6B) generates driving decisions as JSON. GRPO trains it directly on episode outcomes from AutoDrive Gym — no teacher, no labels. Just the environment pushing back.
+
+### Why GRPO fits this problem
+
+PPO needs a value function — an estimate of how good a state is. For Indian road driving, this is hard to learn. The same observation (`hazard at 15m`) can warrant brake *or* accelerate depending on three steps of context the value network doesn't see.
+
+GRPO sidesteps this entirely. It runs **8 parallel rollouts of the same scenario** and compares them: which completions scored higher? That difference *is* the advantage signal. No value network.
+
+This is ideal for Indian road conditions where context matters more than distance. The same `15m gap to auto-rickshaw` might warrant:
+
+- `brake` → if the auto is erratic and accelerating toward you
+- `horn` → if it has committed to the lane change but is slowing
+- `accelerate` → if it has slipped past and is now 20m ahead and receding
+
+These distinctions live in the **sequence of tokens** leading to the action — exactly what GRPO optimizes.
+
+### What the reward structure teaches
+
+We learned from studying winning RL projects that naive reward signals plateau. The agent finds a local maximum (`always brake`) and stops improving.
+
+Three additional signals break this:
+
+- **Repeat-action penalty** — `-0.12` per consecutive repeat, `-0.20` on the third. Breaks the "always brake" shortcut.
+- **Phase-order bonus** — `+0.08` for braking near an approaching hazard, `+0.10` for accelerating once cleared. Rewards *correct sequencing*, not just any action.
+- **Resolution bonus** — `+1.0` to `+3.0` at episode end, scaled by speed. Faster correct decisions earn more.
+
+The result: successful fast episodes score **+3 to +8**, failed episodes score **-2.0**. GRPO gets the variance it needs.
+
+### Running it
+
+```bash
+# Environment server
+uvicorn autodrive_env.server.app:app --host 0.0.0.0 --port 8000
+
+# Fine-tuning (in a separate terminal, GPU required)
+pip install -e ".[grpo]"
+python train_grpo.py --episodes 50 --model-id Qwen/Qwen3-0.6B
+```
+
+Live metrics stream to `reward_log.json` and `live_state.json` every episode. The Training Lab UI (`python grpo_ui.py`) reads these in real time — the **GRPO** tab shows the reward curve updating as training runs.
+
+---
+
 ## Why This Matters Beyond the Hackathon
 
 Autonomous driving research has a representation problem. The environments that matter most for real-world AV deployment — South Asia, Southeast Asia, West Africa, Latin America — are almost entirely absent from mainstream benchmarks.
@@ -238,53 +287,3 @@ AutoDrive Gym is a step toward fixing that. The core principles here — context
 ---
 
 *"The goal isn't to build an agent that always brakes near a hospital. The goal is to build an agent that knows when not to."*
-
-pyproject.toml:
-[build-system]
-requires = ["setuptools>=45", "wheel"]
-build-backend = "setuptools.build_meta"
-
-[project]
-name = "openenv-autodrive_env"
-version = "0.1.0"
-description = "AutoDrive Gym: OpenEnv driving environment for Indian road reasoning."
-requires-python = ">=3.10"
-dependencies = [
-    "openenv-core[core]>=0.2.0",
-    "openai>=1.0.0",
-    "requests>=2.25.0",
-    "fastapi",
-    "uvicorn",
-    "pydantic",
-]
-
-[project.optional-dependencies]
-train = [
-    "torch",
-    "peft",
-    "transformers",
-    "datasets",
-]
-grpo = [
-    "torch",
-    "trl>=0.29.0",
-    "peft>=0.10.0",
-    "transformers>=4.40.0",
-    "datasets>=2.18.0",
-    "vllm>=0.4.0",
-    "accelerate>=0.29.0",
-    "matplotlib",
-    "numpy",
-]
-dev = [
-    "pytest>=8.0.0",
-    "pytest-cov>=4.0.0",
-]
-
-[project.scripts]
-server = "autodrive_env.server.app:main"
-
-[tool.setuptools]
-include-package-data = true
-packages = ["autodrive_env", "autodrive_env.server", "autodrive_env.tasks"]
-package-dir = { "autodrive_env" = ".", "autodrive_env.server" = "server", "autodrive_env.tasks" = "tasks" }

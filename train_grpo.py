@@ -322,6 +322,7 @@ def rollout_once(
     logprobs: list[float] = []
     step_rewards: list[float] = []
     episode_history: list[dict] = []
+    last_actions: list[str] = []  # for repeat-action penalty
 
     MAX_TOTAL_TOKENS = 3072  # prevent OOM during backward
 
@@ -364,7 +365,32 @@ def rollout_once(
         # Execute in environment
         try:
             result = env.step(action)
-            reward = float(result.reward or 0.0)
+            base_reward = float(result.reward or 0.0)
+
+            # ── Repeat-action penalty ─────────────────────────────────────
+            # Prevents the model from looping the same action indefinitely.
+            # -0.12 on the 2nd consecutive repeat, -0.20 on the 3rd+.
+            last_actions.append(action.action)
+            if len(last_actions) >= 3 and last_actions[-1] == last_actions[-2] == last_actions[-3]:
+                repeat_penalty = -0.20
+            elif len(last_actions) >= 2 and last_actions[-1] == last_actions[-2]:
+                repeat_penalty = -0.12
+            else:
+                repeat_penalty = 0.0
+
+            # ── Phase-order bonus ─────────────────────────────────────────
+            # Rewards the correct action sequence: brake while hazard is
+            # approaching, accelerate once it has cleared.
+            stage = getattr(obs, "scenario_stage", "") or ""
+            hd    = float(getattr(obs, "hazard_distance", 999.0) or 999.0)
+            if stage == "approaching" and hd < 14.0 and action.action == "brake":
+                phase_bonus = 0.08
+            elif stage in ("clearing", "cleared") and action.action == "accelerate":
+                phase_bonus = 0.10
+            else:
+                phase_bonus = 0.0
+
+            reward = base_reward + repeat_penalty + phase_bonus
             step_rewards.append(reward)
 
             episode_history.append({
@@ -375,15 +401,23 @@ def rollout_once(
                 "feedback": result.hint or "",
             })
 
-            # Save transcript for offline analysis / SFT later
             obs = result
         except Exception as exc:
             logger.warning("Step error at turn %d: %s", turn, exc)
             step_rewards.append(-0.3)
             break
 
-    total_reward = sum(step_rewards) if step_rewards else -1.0
-    success = bool(obs.done and total_reward > 0 and not (obs.validation or {}).get("collision"))
+    raw_total = sum(step_rewards) if step_rewards else -1.0
+    success   = bool(obs.done and raw_total > 0 and not (obs.validation or {}).get("collision"))
+
+    # ── Resolution bonus / timeout floor ─────────────────────────────────
+    # Success: bonus from +1.0 (slow) to +3.0 (fast), scaled by efficiency.
+    # GRPO needs variance: good fast episodes score +3–8, failures score -2.0.
+    if success:
+        efficiency   = max(0.0, 1.0 - len(step_rewards) / max(max_turns, 1))
+        total_reward = raw_total + 1.0 + 2.0 * efficiency
+    else:
+        total_reward = max(raw_total, -2.0)  # hard floor for clean negative signal
 
     return {
         "prompt_ids": prompt_ids,
