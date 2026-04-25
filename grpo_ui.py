@@ -197,28 +197,25 @@ class _TrainingState:
     # ------------------------------------------------------------------
 
     def _maybe_checkpoint(self, reward: float, scenario: str) -> bool:
-        """Save if this episode achieved a new best reward.  Returns True if saved."""
-        ep = len(self.rewards)
+        """Update in-memory checkpoint state.  MUST be called with self.lock held.
+
+        Disk I/O is deliberately NOT done here -- call _write_checkpoint_async()
+        AFTER releasing the lock to avoid blocking the UI thread.
+        Returns True if a new best was recorded.
+        """
         if reward <= self.best_reward:
             return False
+        ep = len(self.rewards)  # already appended before this call
         ckpt = _Checkpoint(
             episode  = ep,
             reward   = reward,
             q_size   = len(self.learner._q),
             epsilon  = self.learner._epsilon,
             scenario = scenario,
-            q_table  = {str(k): dict(v) for k, v in self.learner._q.items()},
         )
         self.best_reward = reward
         self.best_ckpt   = ckpt
         self.checkpoints.append(ckpt)
-        try:
-            _CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
-            path = _CHECKPOINT_DIR / f"policy_ep{ep:04d}_r{reward:.3f}.json"
-            path.write_text(json.dumps(ckpt.to_dict(), indent=2))
-            logger.info("Checkpoint saved -> %s", path)
-        except Exception as exc:
-            logger.warning("Checkpoint save failed: %s", exc)
         return True
 
     # ------------------------------------------------------------------
@@ -239,12 +236,18 @@ class _TrainingState:
         self._bg_thread.start()
         return "Continuous training started."
 
-    def stop_background(self) -> str:
+    def stop_background(self, join_timeout: float = 5.0) -> str:
         if not self._bg_running:
             return "Not running."
         self._stop_event.set()
         self._bg_running = False
-        return "Stop signal sent -- finishing current episode."
+        # Wait briefly for the thread to exit cleanly so there are no zombies.
+        # Use a short timeout so the UI callback doesn't block for too long.
+        t = self._bg_thread
+        if t is not None and t.is_alive():
+            t.join(timeout=join_timeout)
+        self._bg_thread = None
+        return "Stopped."
 
     def reset(self) -> None:
         self.stop_background()
@@ -274,6 +277,32 @@ _STATE = _TrainingState()
 # Background training loop  (runs in daemon thread)
 # ---------------------------------------------------------------------------
 
+def _write_checkpoint_async(ckpt: _Checkpoint) -> None:
+    """Serialize a checkpoint to disk in a short-lived daemon thread.
+
+    Called OUTSIDE the state lock so disk I/O never blocks the training loop
+    or the UI rendering thread.
+    """
+    def _write() -> None:
+        try:
+            _CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+            data = {
+                "episode":   ckpt.episode,
+                "reward":    round(ckpt.reward, 4),
+                "q_size":    ckpt.q_size,
+                "epsilon":   round(ckpt.epsilon, 4),
+                "scenario":  ckpt.scenario,
+                "algorithm": _ALGORITHM_LABEL,
+            }
+            path = _CHECKPOINT_DIR / f"policy_ep{ckpt.episode:04d}_r{ckpt.reward:.3f}.json"
+            path.write_text(json.dumps(data, indent=2))
+            logger.info("Checkpoint saved -> %s", path)
+        except Exception as exc:
+            logger.warning("Checkpoint save failed: %s", exc)
+
+    threading.Thread(target=_write, daemon=True, name="ckpt-writer").start()
+
+
 def _background_training_loop(state: _TrainingState) -> None:
     """Continuous training loop.  Writes to shared state; never touches Gradio."""
     env          = AutoDriveGymEnvironment()
@@ -298,11 +327,16 @@ def _background_training_loop(state: _TrainingState) -> None:
             baseline_env, None, ep_num, chaos_mode=False
         )
 
+        # Curriculum update + difficulty read -- bg-thread-only, done OUTSIDE lock
+        # so UI callbacks are never blocked waiting for it.
+        env.curriculum.record(stype or "unknown", success, len(actions), reward)
+        curr_diff = (
+            float(env.curriculum.get_difficulty())
+            if hasattr(env, "curriculum") else float(diff or 0.2)
+        )
+        # Lock scope: only brief list appends -- no I/O, no computation
+        new_best = False
         with state.lock:
-            curr_diff = (
-                float(env.curriculum.get_difficulty())
-                if hasattr(env, "curriculum") else float(diff or 0.2)
-            )
             state.rewards.append(reward)
             state.successes.append(success)
             state.collisions.append(collision)
@@ -317,9 +351,10 @@ def _background_training_loop(state: _TrainingState) -> None:
             if not success:
                 state.failed_traces.append({"episode": ep_num + 1, "scenario": stype, "trace": actions})
                 state.failed_traces = state.failed_traces[-5:]
-            state.curriculum.record(stype or "unknown", success, len(actions), reward)
-            state._maybe_checkpoint(reward, stype or "unknown")
-
+            new_best = state._maybe_checkpoint(reward, stype or "unknown")
+        # Checkpoint disk write OUTSIDE the lock -- never block the UI
+        if new_best and state.best_ckpt:
+            _write_checkpoint_async(state.best_ckpt)
         ep_count += 1
 
     logger.info("[BG] Continuous training loop stopped after %d episodes.", ep_count)
@@ -503,12 +538,16 @@ def train_n_episodes(
             baseline_env, None, ep_num, chaos_mode=False
         )
 
+        # Update curriculum and read back the new difficulty BEFORE the lock.
+        # This keeps the lock scope to pure list appends only.
+        env.curriculum.record(stype or "unknown", success, len(actions), reward)
+        curr_diff = (
+            float(env.curriculum.get_difficulty())
+            if hasattr(env, "curriculum")
+            else float(difficulty_override or 0.2)
+        )
+        new_best = False
         with state.lock:
-            curr_diff = (
-                float(env.curriculum.get_difficulty())
-                if hasattr(env, "curriculum")
-                else float(difficulty_override or 0.2)
-            )
             state.rewards.append(reward)
             state.successes.append(success)
             state.collisions.append(collision)
@@ -523,8 +562,9 @@ def train_n_episodes(
             if not success:
                 state.failed_traces.append({"episode": ep_num + 1, "scenario": stype, "trace": actions})
                 state.failed_traces = state.failed_traces[-5:]
-            env.curriculum.record(stype or "unknown", success, len(actions), reward)
-            state._maybe_checkpoint(reward, stype or "unknown")
+            new_best = state._maybe_checkpoint(reward, stype or "unknown")
+        if new_best and state.best_ckpt:
+            _write_checkpoint_async(state.best_ckpt)
 
     with state.lock:
         rewards   = list(state.rewards)
@@ -1131,10 +1171,8 @@ Algorithm in use: Q-learning (PolicyLearner). GRPO (Qwen3 fine-tuning) shown in 
 
 
 def build_ui() -> gr.Blocks:
-    with gr.Blocks(
-        theme=gr.themes.Soft(primary_hue="blue", secondary_hue="orange", neutral_hue="slate"),
-        title="AutoDrive Training Lab",
-    ) as demo:
+    # theme is passed to launch() for Gradio 6 compatibility
+    with gr.Blocks(title="AutoDrive Training Lab") as demo:
 
         gr.Markdown(_HEADER_MD)
 
@@ -1311,12 +1349,25 @@ def main() -> None:
     args = parser.parse_args()
 
     demo = build_ui()
-    demo.launch(
+    # Build theme safely -- older Gradio versions may not have all attributes
+    _theme = None
+    try:
+        _theme = gr.themes.Soft(
+            primary_hue="blue",
+            secondary_hue="orange",
+            neutral_hue="slate",
+        )
+    except Exception:
+        pass
+    launch_kwargs: dict = dict(
         server_name=args.server,
         server_port=args.port,
         share=args.share,
         inbrowser=not args.no_browser,
     )
+    if _theme is not None:
+        launch_kwargs["theme"] = _theme
+    demo.launch(**launch_kwargs)
 
 
 if __name__ == "__main__":
