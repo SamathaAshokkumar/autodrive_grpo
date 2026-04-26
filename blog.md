@@ -239,7 +239,7 @@ On familiar roads, the agent is fast. On novel situations, it reasons deeply. Be
 
 ## Live Training Dashboard
 
-![AutoDrive Gym Live Dashboard](./assets/live_demo.png)
+![AutoDrive Gym Live Dashboard](https://huggingface.co/spaces/Samatha369/autodrive_grpo/blob/main/live_demo.png)
 
 The dashboard tracks episode progress, agent decisions, reward signals, success rate, and current scenario state — updated in real time during training.
 
@@ -356,7 +356,7 @@ GRPO sees the difference: A worked better than B and C. Why? It must have been t
 
 This is exactly what Indian road driving requires: **context-aware decision sequences**, not myopic state-value estimates.
 
-![AutoDrive Gym HF space](./assets/hf_space_plots.png)
+![AutoDrive Gym HF space](https://huggingface.co/spaces/Samatha369/autodrive_grpo/blob/main/hf_space_plots.png)
 
 ### Breaking Out of Local Maxima: The Reward Structure
 
