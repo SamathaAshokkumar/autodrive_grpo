@@ -983,8 +983,21 @@ def make_grpo_chart() -> tuple[plt.Figure, str]:
         try:
             with open(_GRPO_JSON_PATH) as f:
                 data = json.load(f)
-            grpo_rewards   = [max(0.02, min(0.98, float(r))) for r in data.get("reward_curve",  [])]
-            grpo_successes = [int(s) for s in data.get("success_curve", [])]
+            # Prefer mean_step_reward from each episode: it's the per-step
+            # average (total_reward / steps) and is already in (0.02, 0.98).
+            # reward_curve stores the raw SUM of step rewards — e.g. 16.277
+            # for an 18-step episode — which all clamp to 0.98 and produce a
+            # meaningless flat line.
+            episodes = data.get("episodes", [])
+            if episodes:
+                grpo_rewards = [
+                    max(0.02, min(0.98, float(ep.get("mean_step_reward") or ep.get("total_reward", 0.5))))
+                    for ep in episodes
+                ]
+                grpo_successes = [int(bool(ep.get("success", False))) for ep in episodes]
+            else:
+                grpo_rewards   = [max(0.02, min(0.98, float(r))) for r in data.get("reward_curve",  [])]
+                grpo_successes = [int(s) for s in data.get("success_curve", [])]
             live = {}
             try:
                 live = json.loads(Path("live_state.json").read_text())
