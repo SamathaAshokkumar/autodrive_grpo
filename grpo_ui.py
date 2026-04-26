@@ -501,7 +501,8 @@ def _run_episode(
             logger.warning("env.step() failed at step %d: %s", step, exc)
             break
 
-        reward = float(next_obs.reward or 0.0)
+        # Clamp per-step reward to (0.02, 0.98) — same contract as graders.py.
+        reward = max(0.02, min(0.98, float(next_obs.reward or 0.0)))
         total_reward += reward
 
         # Count rule violations: braking hard in a zone marked "cleared" or
@@ -521,7 +522,7 @@ def _run_episode(
             "step":        step + 1,
             "action":      action_str,
             "value":       round(action_val, 2),
-            "reward":      round(reward, 3),
+            "reward":      round(reward, 4),
             "hazard_dist": round(hazard_dist, 1),
             "hint":        next_obs.hint or "",
             "stage":       next_obs.scenario_stage or "approaching",
@@ -967,7 +968,7 @@ def make_grpo_chart() -> tuple[plt.Figure, str]:
                 next(reader, None)
                 for row in reader:
                     if len(row) >= 3:
-                        grpo_rewards.append(float(row[1]))
+                        grpo_rewards.append(max(0.02, min(0.98, float(row[1]))))
                         grpo_successes.append(int(row[2]))
             source_info = (
                 f"Source: {Path(csvs[0]).parent.name}/reward_log.csv  |  "
@@ -982,8 +983,8 @@ def make_grpo_chart() -> tuple[plt.Figure, str]:
         try:
             with open(_GRPO_JSON_PATH) as f:
                 data = json.load(f)
-            grpo_rewards   = [float(r) for r in data.get("reward_curve",  [])]
-            grpo_successes = [int(s)   for s in data.get("success_curve", [])]
+            grpo_rewards   = [max(0.02, min(0.98, float(r))) for r in data.get("reward_curve",  [])]
+            grpo_successes = [int(s) for s in data.get("success_curve", [])]
             live = {}
             try:
                 live = json.loads(Path("live_state.json").read_text())
