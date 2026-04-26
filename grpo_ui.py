@@ -13,6 +13,7 @@ Features
 * Curriculum progression: difficulty + epsilon decay over time
 * Checkpoint tracker: best policy auto-saved; version history panel
 * GRPO tab: reads live output from train_grpo.py when running simultaneously
+* Live Simulation tab: real-time road scene with ego car, hazard, action trail
 * Failed episode replay: last 5 failed episodes with step-by-step trace
 * Chaos mode / difficulty override / scenario filter controls
 
@@ -42,6 +43,7 @@ from typing import Any
 
 import matplotlib
 matplotlib.use("Agg")
+import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -112,6 +114,18 @@ _PALETTE = {
     "trend_down": "#2E7D32",
     "grpo":       "#00BCD4",
     "ckpt":       "#FDD835",
+}
+
+# Action colours mirrored from the /demo page in app.py
+_ACTION_COL: dict[str, str] = {
+    "brake":              "#EF4444",
+    "accelerate":         "#22C55E",
+    "wait":               "#EAB308",
+    "horn":               "#F97316",
+    "steer_left":         "#3B82F6",
+    "steer_right":        "#8B5CF6",
+    "change_lane_left":   "#06B6D4",
+    "change_lane_right":  "#14B8A6",
 }
 
 _FIG_KWARGS = {"facecolor": "#F8F9FA"}
@@ -510,6 +524,8 @@ def _run_episode(
             "reward":      round(reward, 3),
             "hazard_dist": round(hazard_dist, 1),
             "hint":        next_obs.hint or "",
+            "stage":       next_obs.scenario_stage or "approaching",
+            "hazard_type": next_obs.hazard_type or scenario_type,
         })
         obs = next_obs
 
@@ -1045,6 +1061,246 @@ def _plot_grpo_rewards(rewards: list[float], successes: list[int] | None = None)
 
 
 # ---------------------------------------------------------------------------
+# Chart 6: Live road simulation
+# ---------------------------------------------------------------------------
+
+_HAZARD_ICONS: dict[str, str] = {
+    "pedestrian":     "🚶",
+    "bike":           "🏍",
+    "auto":           "🛺",
+    "auto_cut_in":    "🛺",
+    "car":            "🚗",
+    "truck":          "🚚",
+    "pothole":        "⚠️",
+    "pothole_ahead":  "⚠️",
+    "ambulance":      "🚑",
+    "ambulance_approach": "🚑",
+    "animal":         "🐄",
+    "animal_crossing": "🐄",
+    "traffic_police": "👮",
+    "police_override": "👮",
+    "speed_breaker":  "🚧",
+    "bike_blind_spot": "🏍",
+    "pedestrian_crossing": "🚶",
+}
+
+
+def make_simulation_chart() -> plt.Figure:
+    """Render the current driving state as a live road-scene figure.
+
+    Layout:
+    ┌──────────────────────────────┬────────────┐
+    │  Road scene (car + hazard)   │ Live stats │
+    ├──────────────────────────────┴────────────┤
+    │  Action trail (step rewards per action)   │
+    └───────────────────────────────────────────┘
+    """
+    with _STATE.lock:
+        action_log = list(_STATE.action_log[-30:])
+        scenarios  = list(_STATE.scenarios)
+        rewards    = list(_STATE.rewards)
+        successes  = list(_STATE.successes)
+        running    = _STATE._bg_running
+        episodes   = len(rewards)
+
+    latest   = action_log[-1] if action_log else None
+    scenario = scenarios[-1] if scenarios else "waiting for training..."
+
+    # ── Figure layout ─────────────────────────────────────────────────────
+    fig = plt.figure(figsize=(14, 6), facecolor="#0F172A")
+    gs  = fig.add_gridspec(
+        2, 2,
+        height_ratios=[2.2, 1],
+        width_ratios=[3.2, 1],
+        hspace=0.15,
+        wspace=0.08,
+    )
+    ax_road  = fig.add_subplot(gs[0, 0])
+    ax_stats = fig.add_subplot(gs[0, 1])
+    ax_trail = fig.add_subplot(gs[1, :])
+
+    # ── Road scene ────────────────────────────────────────────────────────
+    ax_road.set_facecolor("#0F172A")
+    ax_road.set_xlim(0, 10)
+    ax_road.set_ylim(0, 4.2)
+    ax_road.axis("off")
+
+    # Sky gradient (simple fill)
+    sky = mpatches.Rectangle((0, 3.2), 10, 1.0, color="#1E3A5F", zorder=0)
+    ax_road.add_patch(sky)
+
+    # Road surface
+    road = mpatches.Rectangle((0, 0.7), 10, 2.5, color="#374151", zorder=1)
+    ax_road.add_patch(road)
+
+    # Kerb lines
+    ax_road.add_patch(mpatches.Rectangle((0, 0.65), 10, 0.08, color="#94A3B8", alpha=0.4, zorder=2))
+    ax_road.add_patch(mpatches.Rectangle((0, 3.12), 10, 0.08, color="#94A3B8", alpha=0.4, zorder=2))
+
+    # Lane dashes (centre line)
+    for x in np.arange(0.4, 9.6, 1.2):
+        ax_road.plot([x, x + 0.75], [1.95, 1.95], color="white", alpha=0.22, lw=1.4, zorder=2)
+
+    # ── Determine current state ────────────────────────────────────────────
+    hd         = float(latest["hazard_dist"])  if latest else 999.0
+    cur_action = latest["action"]              if latest else "wait"
+    step_r     = float(latest["reward"])       if latest else 0.0
+    hint       = (latest.get("hint") or "").lower()
+    step_num   = latest["step"]                if latest else 0
+    haz_type   = latest.get("hazard_type") or scenario.split("_")[0]
+
+    # Stage inference from hint
+    if "cleared" in hint or "accelerate now" in hint:
+        stage     = "cleared"
+        stage_col = "#22C55E"
+    elif "clearing" in hint or "easing" in hint:
+        stage     = "clearing"
+        stage_col = "#EAB308"
+    else:
+        stage     = "approaching"
+        stage_col = "#EF4444"
+
+    # ── Ego vehicle ────────────────────────────────────────────────────────
+    ego_x, ego_y = 1.3, 1.9
+    ego_box = mpatches.FancyBboxPatch(
+        (ego_x - 0.45, ego_y - 0.28), 0.9, 0.56,
+        boxstyle="round,pad=0.06",
+        facecolor="#1D4ED8", edgecolor="#93C5FD", lw=1.8, zorder=5,
+    )
+    ax_road.add_patch(ego_box)
+    ax_road.text(ego_x, ego_y + 0.01, "🚗", ha="center", va="center", fontsize=15, zorder=6)
+
+    # Action badge under ego car
+    a_col = _ACTION_COL.get(cur_action, "#94A3B8")
+    ax_road.text(
+        ego_x, ego_y - 0.55,
+        cur_action.replace("_", " ").upper(),
+        ha="center", va="top", fontsize=8.5, fontweight="bold",
+        color=a_col, zorder=7,
+        bbox=dict(boxstyle="round,pad=0.25", facecolor="#0F172A",
+                  alpha=0.9, edgecolor=a_col, lw=1.1),
+    )
+
+    # ── Hazard object ──────────────────────────────────────────────────────
+    MAX_DIST = 40.0
+    if hd < MAX_DIST and latest:
+        t     = hd / MAX_DIST          # 0 = close (near ego), 1 = far
+        haz_x = min(ego_x + 0.9 + t * 7.0, 9.4)
+        icon  = _HAZARD_ICONS.get(haz_type, "⚠️")
+
+        # Glow circle behind icon
+        ax_road.plot(haz_x, ego_y, "o", markersize=26, color=stage_col, alpha=0.22, zorder=3)
+        ax_road.text(haz_x, ego_y, icon, ha="center", va="center", fontsize=16, zorder=4)
+
+        # Distance label above hazard
+        ax_road.text(
+            haz_x, ego_y + 0.60,
+            f"{hd:.1f} m",
+            ha="center", color=stage_col, fontsize=9, fontweight="bold", zorder=5,
+        )
+
+        # Range line ego → hazard
+        ax_road.annotate(
+            "", xy=(haz_x - 0.25, ego_y), xytext=(ego_x + 0.45, ego_y),
+            arrowprops=dict(
+                arrowstyle="->", color=stage_col, lw=1.2,
+                connectionstyle="arc3,rad=0.0", alpha=0.5,
+            ),
+            zorder=3,
+        )
+
+    # ── Stage + step reward overlay ────────────────────────────────────────
+    ax_road.text(
+        9.6, 3.85,
+        f"STAGE: {stage.upper()}",
+        ha="right", color=stage_col, fontsize=10, fontweight="bold", zorder=7,
+    )
+    r_col = "#22C55E" if step_r > 0 else "#EF4444"
+    ax_road.text(
+        9.6, 3.5,
+        f"Step reward: {step_r:+.3f}",
+        ha="right", color=r_col, fontsize=9, zorder=7,
+    )
+
+    # ── Scenario title ─────────────────────────────────────────────────────
+    status_dot = "●" if running else "○"
+    sc_label   = scenario.replace("_", " ").title()
+    ax_road.set_title(
+        f"{status_dot} {'LIVE' if running else 'IDLE'}  —  {sc_label}  —  Step {step_num}",
+        color="white", fontsize=11, fontweight="bold", pad=5,
+        bbox=dict(boxstyle="round,pad=0.3", facecolor="#1E293B", alpha=0.9, edgecolor="#334155"),
+    )
+
+    # ── Stats panel ────────────────────────────────────────────────────────
+    ax_stats.set_facecolor("#0F172A")
+    ax_stats.axis("off")
+
+    sr10   = (sum(1 for s in successes[-10:] if s) / max(len(successes[-10:]), 1) * 100)
+    last_r = rewards[-1] if rewards else 0.0
+    roll10 = sum(rewards[-10:]) / max(len(rewards[-10:]), 1) if rewards else 0.0
+    best_r = max(rewards) if rewards else 0.0
+
+    stat_rows: list[tuple[str, str, str]] = [
+        ("Episodes",      f"{episodes}",          "#94A3B8"),
+        ("Last reward",   f"{last_r:+.3f}",        "#94A3B8"),
+        ("Rolling-10",    f"{roll10:.3f}",          "#3B82F6"),
+        ("Best reward",   f"{best_r:.3f}",          "#FDD835"),
+        ("Success (10)",  f"{sr10:.0f}%",
+            "#22C55E" if sr10 >= 50 else "#EF4444"),
+        ("Status",        "RUNNING" if running else "IDLE",
+            "#22C55E" if running else "#94A3B8"),
+    ]
+    for i, (label, val, col) in enumerate(stat_rows):
+        yp = 0.92 - i * 0.155
+        ax_stats.text(0.06, yp, label, ha="left",  color="#475569", fontsize=9,
+                      transform=ax_stats.transAxes)
+        ax_stats.text(0.94, yp, val,   ha="right", color=col,       fontsize=10,
+                      fontweight="bold", transform=ax_stats.transAxes)
+
+    # ── Action trail ──────────────────────────────────────────────────────
+    ax_trail.set_facecolor("#1E293B")
+    ax_trail.spines[:].set_color("#334155")
+
+    if action_log:
+        steps_t   = [a["step"]   for a in action_log]
+        rewards_t = [a["reward"] for a in action_log]
+        actions_t = [a["action"] for a in action_log]
+        bar_cols  = [_ACTION_COL.get(a, "#94A3B8") for a in actions_t]
+
+        ax_trail.bar(steps_t, rewards_t, color=bar_cols, alpha=0.75, width=0.65, zorder=2)
+        ax_trail.axhline(0, color="#475569", lw=0.9, zorder=1)
+        ax_trail.set_ylabel("Step reward", fontsize=8, color="#94A3B8")
+        ax_trail.tick_params(colors="#94A3B8", labelsize=7)
+
+        # Colour legend (first 4 actions)
+        shown = sorted({a["action"] for a in action_log})[:6]
+        for act in shown:
+            ax_trail.bar([], [], color=_ACTION_COL.get(act, "#94A3B8"),
+                         alpha=0.75, label=act)
+        ax_trail.legend(
+            fontsize=7, loc="upper right", ncol=min(len(shown), 6),
+            facecolor="#1E293B", edgecolor="#334155", labelcolor="#CBD5E1",
+        )
+    else:
+        ax_trail.text(
+            0.5, 0.5,
+            "Action trail appears here once training starts",
+            ha="center", va="center",
+            transform=ax_trail.transAxes, fontsize=10, color="#475569",
+        )
+
+    ax_trail.set_xlabel("Step number (last 30 steps)", fontsize=8, color="#94A3B8")
+    ax_trail.set_title(
+        "Per-Step Rewards Coloured by Action Type",
+        fontsize=9, color="#94A3B8", pad=2,
+    )
+
+    fig.patch.set_facecolor("#0F172A")
+    plt.tight_layout(pad=0.8)
+    return fig
+
+
+# ---------------------------------------------------------------------------
 # Live status helpers (called by polling or refresh buttons)
 # ---------------------------------------------------------------------------
 
@@ -1121,6 +1377,7 @@ def refresh_all_charts() -> tuple:
         make_difficulty_chart(),
         grpo_fig,
         grpo_info,
+        make_simulation_chart(),
         _get_status_text(),
         _get_checkpoint_history(),
         _get_failed_replay(),
@@ -1141,6 +1398,7 @@ def train_and_visualize(n: int, difficulty: float, scenario_filter: str, chaos: 
         make_difficulty_chart(),
         grpo_fig,
         grpo_info,
+        make_simulation_chart(),
         _get_status_text(),
         _get_checkpoint_history(),
         _get_failed_replay(),
@@ -1166,20 +1424,29 @@ def refresh_grpo() -> tuple:
 
 def reset_training() -> tuple:
     _STATE.reset()
-    empty_reward  = _empty_fig("Reward Curve -- Q-learner vs Heuristic Baseline")
-    empty_safety  = _empty_fig("Safety Metrics")
+    empty_reward   = _empty_fig("Reward Curve -- Q-learner vs Heuristic Baseline")
+    empty_safety   = _empty_fig("Safety Metrics")
     empty_scenario = _empty_fig("Scenario Breakdown")
-    empty_diff    = _empty_fig("Curriculum Progression")
+    empty_diff     = _empty_fig("Curriculum Progression")
+    empty_grpo     = _empty_fig("GRPO Training Progress", "No GRPO data. Reset complete.")
+    empty_sim      = _empty_fig("Live Simulation", "Training reset.\nStart training to see the road scene.")
+    # Must match _all_chart_outputs order exactly:
+    # reward_plot, safety_plot, scenario_plot, difficulty_plot,
+    # grpo_plot, grpo_info_md, simulation_plot,
+    # status_bar, checkpoint_text, failed_text
     return (
-        {},
-        "Training state reset.",
-        empty_reward,
-        empty_safety,
-        empty_scenario,
-        empty_diff,
-        "Reset complete.",
-        "No checkpoints yet.",
-        "No failed episodes yet.",
+        {},                                    # stats_json
+        "Training state reset.",               # latest_action
+        empty_reward,                          # reward_plot
+        empty_safety,                          # safety_plot
+        empty_scenario,                        # scenario_plot
+        empty_diff,                            # difficulty_plot
+        empty_grpo,                            # grpo_plot
+        "*No GRPO data — reset complete.*",    # grpo_info_md (Markdown)
+        empty_sim,                             # simulation_plot
+        "Reset complete.",                     # status_bar
+        "No checkpoints yet.",                 # checkpoint_text
+        "No failed episodes yet.",             # failed_text
     )
 
 
@@ -1258,6 +1525,17 @@ def build_ui() -> gr.Blocks:
             with gr.Column(scale=3):
                 with gr.Tabs():
 
+                    with gr.Tab("Live Simulation"):
+                        gr.Markdown(
+                            "Real-time road scene rendered from the training state.  "
+                            "🚗 ego car on the left — hazard object positioned by distance.  "
+                            "Stage colours: 🔴 approaching · 🟡 clearing · 🟢 cleared.  "
+                            "Bottom bar = per-step reward coloured by action type.  "
+                            "Click **Refresh Charts** or **Refresh Scene** to update."
+                        )
+                        simulation_plot = gr.Plot(show_label=False)
+                        sim_refresh = gr.Button("Refresh Scene", variant="secondary")
+
                     with gr.Tab("Reward Curve"):
                         gr.Markdown("Blue = Q-learner, orange = fixed baseline. Yellow markers = new-best-reward checkpoints. Bottom panel = per-episode delta.")
                         reward_plot = gr.Plot(show_label=False)
@@ -1307,6 +1585,7 @@ def build_ui() -> gr.Blocks:
         _all_chart_outputs = [
             reward_plot, safety_plot, scenario_plot, difficulty_plot,
             grpo_plot, grpo_info_md,
+            simulation_plot,
             status_bar, checkpoint_text, failed_text,
         ]
 
@@ -1320,6 +1599,12 @@ def build_ui() -> gr.Blocks:
             fn=refresh_all_charts,
             inputs=[],
             outputs=_all_chart_outputs,
+        )
+
+        sim_refresh.click(
+            fn=make_simulation_chart,
+            inputs=[],
+            outputs=[simulation_plot],
         )
 
         start_btn.click(

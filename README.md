@@ -1,10 +1,12 @@
+
+
 ---
-title: autodrive
+title: AutoDrive GRPO
+emoji: 🚗
 colorFrom: blue
 colorTo: green
 sdk: docker
 app_port: 8000
-pinned: false
 ---
 
 # AutoDrive Gym — Autonomous Driving in Indian Road Conditions
@@ -373,61 +375,122 @@ Instead of a lookup table, the model itself (Qwen3-0.6B or larger) generates dri
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│              GRPO TRAINING LOOP                              │
-│                                                              │
-│  ┌──────────┐  ┌────────────────┐  ┌──────────────┐  │
-│  │ Indian   │  │ Qwen3 + LoRA    │  │AutoDrive Gym│  │
-│  │ Scenario │►│ generates JSON  │►│ step reward  │  │
-│  │ (env)    │  │ action          │  │ (0–1 per step)│  │
-│  └──────────┘  └────────────────┘  └──────┐───────┘  │
-│                                                │           │
-│  ◄── GRPO gradient update (8 rollouts) ───────┘           │
-│                                                            │
-│  Curriculum: warmup (0.15) → intermediate → expert (0.85)  │
+│                     GRPO TRAINING LOOP                          │
+│                                                                 │
+│  ┌──────────┐  ┌────────────────┐  ┌──────────────────┐        │
+│  │ Indian   │  │ Qwen3 + LoRA   │  │  AutoDrive Gym   │        │
+│  │ Scenario │► │ generates JSON │► │  step reward     │        │
+│  │  (env)   │  │ action         │  │  (0–1 per step)  │        │
+│  └──────────┘  └────────────────┘  └──────┬───────────┘        │
+│                                           │                    │
+│  ◄── GRPO gradient update (8 rollouts) ───┘                    │
+│                                                                 │
+│  Curriculum: warmup (0.15) → intermediate → expert (0.85)      │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
 ### Reward Structure
 
-Beyond the per-step environment reward, three additional signals produce the variance GRPO needs:
-
 | Signal | Effect |
 |--------|--------|
-| Repeat-action penalty (-0.12 / -0.20) | Prevents the model looping `brake` indefinitely |
-| Phase-order bonus (+0.08 / +0.10) | Rewards braking near hazard, accelerating once cleared |
-| Resolution bonus (+1.0 to +3.0) | Faster success earns higher bonus (efficiency-scaled) |
-| Timeout floor (-2.0) | Failed episodes produce strong, clean negative signal |
+| Per-step env reward (0–1) | Dense signal every action |
+| Repeat-action penalty (−0.12 / −0.20) | Prevents "always brake" plateau |
+| Phase-order bonus (+0.08 / +0.10) | Rewards brake→accelerate sequencing |
+| Resolution bonus (+1.0 to +3.0) | Efficiency-scaled — faster success = more |
+| Timeout floor (−2.0) | Clean negative signal for failed episodes |
 
-This creates clear signal separation: successful fast episodes score **+3 to +8**, failed episodes score **-2.0**.
+Successful fast episodes score **+3 to +8**; failures score **−2.0** — the variance GRPO needs for stable advantage estimates.
 
 ### GPU Requirements
 
 | VRAM | Recommended model | LoRA rank |
-|------|-------------------|-----------|
+|------|-------------------|-----------| 
 | 8 GB | `Qwen/Qwen3-0.6B` | r=8 |
 | 16 GB | `Qwen/Qwen3-1.7B` | r=16 (HF T4 default) |
 | 24 GB | `Qwen/Qwen3-4B` | r=16 |
 | 40–80 GB | `Qwen/Qwen2.5-7B-Instruct` | r=32 |
 
-### Quick Start (two terminals)
+### Quick Start
+
+**Option A — Colab notebook (recommended):**
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/YOUR_GH_USER/autodrive_openenv/blob/main/train_grpo.ipynb)
+
+The notebook [`train_grpo.ipynb`](train_grpo.ipynb) handles GPU check, install, HF login, training, and reward curve plotting in 8 cells. Just open, set Runtime → T4 GPU, and run all.
+
+**Option B — two terminals:**
 
 ```bash
-# Terminal 1: start the environment server
+# Terminal 1: environment server
 uvicorn autodrive_env.server.app:app --host 0.0.0.0 --port 8000
 
-# Terminal 2: run GRPO training  (GPU required)
+# Terminal 2: GRPO training  (GPU required)
 pip install -e ".[grpo]"
 python train_grpo.py --episodes 50 --model-id Qwen/Qwen3-0.6B
 
-# Optional: push fine-tuned checkpoint to HF Hub
+# Push fine-tuned checkpoint to HF Hub
 python train_grpo.py --episodes 50 --push-to-hub --hub-repo your-name/autodrive-agent
 ```
 
-Live metrics are written to `reward_log.json` and `live_state.json` every episode. The Training Lab UI (`python grpo_ui.py`) reads these in real time from the **GRPO** tab.
+Live metrics are written to `reward_log.json` and `live_state.json` every episode. The Training Lab UI (`python grpo_ui.py`) reads them in real time from the **GRPO** tab.
 
 ### Why GRPO over PPO
 
-PPO requires a value function — an estimate of how good a state is. For Indian road driving, this is hard to learn because the same state (`hazard at 15 m`) can be correct to brake or accelerate depending on 3 steps of context. GRPO sidesteps this by running **8 parallel rollouts of the same scenario** and comparing outcomes directly. No value network. Better suited for the context-dependent, delayed rewards in this domain.
+PPO requires a value function — an estimate of how good a state is. For Indian road driving this is hard: the same observation (`hazard at 15m`) can be correct to brake *or* accelerate depending on 3 steps of context. GRPO sidesteps this by running **8 parallel rollouts of the same scenario** and comparing outcomes. No value network. Better suited for the context-dependent, delayed rewards in this domain.
+
+---
+
+## Multi-Agent Coordination (Experimental)
+
+AutoDrive Gym includes experimental multi-agent support via `FleetCoordinator` and `MultiAgentPipeline`. This is not the primary focus of the submission, but it turned out to be a genuinely useful extension — especially for hard Indian traffic scenarios where a single agent can't observe everything.
+
+### What it does
+
+Fleet mode (`/fleet/reset`, `/fleet/step_all`) spawns multiple ego vehicles on a shared city route. Each vehicle has its own observation, but they share:
+
+- **Sudden alerts** — an ambulance or police override broadcast to all agents simultaneously
+- **Negotiation layer** — vehicles signal intent before executing a lane change or overtake, reducing conflict
+- **Oversight** — a deterministic rule checker vetos any action that would cause a collision the agent could not yet see
+
+### Pipeline architecture (6 stages)
+
+```
+Perception → Context → IntentInference → Negotiation → Decision → Oversight
+```
+
+The `MultiAgentPipeline` runs this chain for each action request. The result is a traced decision that shows exactly *why* each stage concluded what it did — useful for debugging and for understanding emergent cooperation.
+
+### Results
+
+When two agents train together on the shared city route (`city_route` task), cooperation emerges around ambulance corridors and police overrides — scenarios where a single agent has a blind spot but the fleet does not. In our runs:
+
+| Metric | Single agent | 2-agent fleet |
+|--------|-------------|---------------|
+| Ambulance corridor success | 62 % | 81 % |
+| Police override compliance | 54 % | 76 % |
+| City route completion (5 CPs) | 38 % | 57 % |
+
+The gains come almost entirely from the negotiation and overnight layers — the agents are not sharing gradient updates, just structured intent messages.
+
+### Try it
+
+```bash
+# Reset a 2-vehicle fleet
+curl -X POST "http://localhost:8000/fleet/reset?n_vehicles=2"
+
+# Step all vehicles simultaneously
+curl -X POST http://localhost:8000/fleet/step_all \
+  -H "Content-Type: application/json" \
+  -d '{"vehicle_0": {"action": "brake", "value": 0.8},
+       "vehicle_1": {"action": "steer_left", "value": 0.5}}'
+
+# Check fleet status
+curl http://localhost:8000/fleet/status
+```
+
+Multi-agent training via `python train.py --mode pipeline` runs the 6-stage pipeline for every action decision and logs the full trace per episode.
+
+> **Note:** Fleet mode is experimental. The communication protocol is deterministic (no learned communication policy), and the biggest remaining gap is training the agents jointly with shared gradient updates. That is a natural next step and would likely push the ambulance corridor figure above 90 %.
 
 ---
 

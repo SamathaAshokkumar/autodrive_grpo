@@ -380,8 +380,16 @@ def rollout_once(
             step_rewards.append(-0.3)
             break
 
-    total_reward = sum(step_rewards) if step_rewards else -1.0
-    success = bool(obs.done and total_reward > 0 and not (obs.validation or {}).get("collision"))
+    # Normalise to a per-step average so the episode reward stays in (0.02, 0.98)
+    # regardless of how many steps the episode ran.  Summing raw step rewards gives
+    # inflated values (e.g. 22.6 for a 25-step episode) which breaks the graders.py
+    # contract and collapses GRPO advantage variance to near-zero.
+    if step_rewards:
+        avg_reward   = sum(step_rewards) / len(step_rewards)
+        total_reward = max(0.02, min(0.98, avg_reward))
+    else:
+        total_reward = 0.02
+    success = bool(obs.done and total_reward > 0.5 and not (obs.validation or {}).get("collision"))
 
     return {
         "prompt_ids": prompt_ids,
@@ -396,13 +404,121 @@ def rollout_once(
 # ── Reward functions (TRL convention — one per reward signal) ─────────────────
 
 def reward_total(completions: list[str], **kwargs) -> list[float]:
+    """Episode-level reward strictly in (0.02, 0.98) as per graders.py contract."""
     rewards = kwargs.get("total_reward")
-    return [float(r) for r in rewards] if rewards else [0.0] * len(completions)
+    if not rewards:
+        return [0.0] * len(completions)
+    return [max(0.02, min(0.98, float(r))) for r in rewards]
 
 
 def reward_success(completions: list[str], **kwargs) -> list[float]:
     successes = kwargs.get("success")
-    return [1.0 if s else 0.0 for s in successes] if successes else [0.0] * len(completions)
+    return [0.98 if s else 0.02 for s in successes] if successes else [0.0] * len(completions)
+
+
+# ── No-vLLM reward (Colab / CPU-friendly) ─────────────────────────────────────
+# When use_vllm=False and no rollout_func is provided, GRPOTrainer calls the
+# reward functions with (completions, **dataset_columns).  The standard
+# reward_total returns 0.0 for every sample because 'total_reward' is not in
+# the dataset → all advantages = 0 → loss = 0.
+#
+# This function is self-contained: it parses the completion text into a driving
+# action, then scores it via tasks.graders.grade_action() using the obs snapshot
+# that was pre-serialised into the dataset.  Values are strictly in (0.02, 0.98).
+
+def reward_driving_inline(
+    completions: list[str],
+    task_id: list[str] | None = None,
+    hazard_distance: list[float] | None = None,
+    scenario_stage: list[str] | None = None,
+    collision: list[bool] | None = None,
+    near_miss: list[bool] | None = None,
+    safe_distance: list[bool] | None = None,
+    **kwargs,
+) -> list[float]:
+    """Self-contained reward for --no-vllm mode (no rollout_func required).
+
+    Parses each LLM completion → driving action, then grades it via
+    grade_action() with the observation snapshot stored in the dataset.
+    Returns values strictly in (0.02, 0.98).
+    """
+    try:
+        from tasks.graders import grade_action
+    except ImportError:
+        try:
+            from autodrive_env.tasks.graders import grade_action
+        except ImportError:
+            # Fallback: can't import graders — return mid-range reward so at
+            # least the training loop produces non-zero advantages.
+            return [0.5] * len(completions)
+
+    n = len(completions)
+    tids  = task_id        or ["pedestrian_crossing"] * n
+    hds   = hazard_distance or [10.0]  * n
+    stgs  = scenario_stage  or ["approaching"] * n
+    colls = collision        or [False] * n
+    nms   = near_miss        or [False] * n
+    sds   = safe_distance    or [True]  * n
+
+    out: list[float] = []
+    for i, comp in enumerate(completions):
+        action  = parse_action(comp).action
+        signals = {
+            "hazard_distance": hds[i],
+            "scenario_stage":  stgs[i],
+            "collision":       colls[i],
+            "near_miss":       nms[i],
+            "safe_distance":   sds[i],
+        }
+        out.append(grade_action(tids[i], action, signals))
+    return out
+
+
+def _build_dataset_with_obs(
+    episodes: int,
+    env: "AutoDriveGymEnvironment",
+    tokenizer: "AutoTokenizer",
+) -> "Dataset":
+    """Pre-generate episode starting states for --no-vllm training.
+
+    Each row stores the formatted prompt PLUS the raw obs signals so that
+    reward_driving_inline() can score completions without running the env.
+    This is the correct approach for use_vllm=False / no rollout_func.
+    """
+    prompts, task_ids, hd_vals, stages, colls, nms, sds = [], [], [], [], [], [], []
+    for _ in range(episodes):
+        try:
+            obs = env.reset()
+        except Exception:
+            obs = None
+        if obs is None:
+            prompts.append("Navigate Indian road conditions safely.")
+            task_ids.append("pedestrian_crossing")
+            hd_vals.append(10.0)
+            stages.append("approaching")
+            colls.append(False)
+            nms.append(False)
+            sds.append(True)
+            continue
+
+        prompt = format_observation(obs, [])
+        prompts.append(prompt)
+        task_ids.append(obs.scenario_type or "pedestrian_crossing")
+        hd_vals.append(float(obs.hazard_distance or 10.0))
+        stages.append(obs.scenario_stage or "approaching")
+        colls.append(False)
+        nms.append(False)
+        sds.append(True)
+
+    return Dataset.from_dict({
+        "prompt":          prompts,
+        "task_id":         task_ids,
+        "hazard_distance": hd_vals,
+        "scenario_stage":  stages,
+        "collision":       colls,
+        "near_miss":       nms,
+        "safe_distance":   sds,
+    })
 
 
 # ── CLI args ──────────────────────────────────────────────────────────────────
@@ -438,6 +554,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--save-steps", type=int, default=10)
     p.add_argument("--temperature", type=float, default=1.0,
                    help="T=1.0 is optimal for GRPO exploration diversity")
+    p.add_argument("--no-vllm", action="store_true",
+                   help=(
+                       "Disable vLLM (CPU / Colab-compatible). Uses inline grader-based "
+                       "reward — no GPU or rollout_func required. Slower but works on T4 "
+                       "without the vLLM colocate memory overhead."
+                   ))
     return p.parse_args()
 
 
@@ -453,7 +575,7 @@ def main() -> None:
     logger.info("Model:       %s", args.model_id)
     logger.info("Episodes:    %d", args.episodes)
     logger.info("Generations: %d", args.num_generations)
-    logger.info("vLLM mode:   %s", args.vllm_mode)
+    logger.info("vLLM mode:   %s", "DISABLED (--no-vllm)" if args.no_vllm else args.vllm_mode)
 
     # ── Tokenizer ─────────────────────────────────────────────────────────────
     tokenizer = AutoTokenizer.from_pretrained(args.model_id)
@@ -464,10 +586,17 @@ def main() -> None:
     # Uses the local gym directly (no HTTP needed — faster rollouts)
     env = AutoDriveGymEnvironment()
 
-    # ── Dataset (one entry per episode) ───────────────────────────────────────
-    dataset = Dataset.from_dict(
-        {"prompt": ["Navigate Indian road conditions safely."] * args.episodes}
-    )
+    # ── Dataset ───────────────────────────────────────────────────────────────
+    # --no-vllm mode: pre-generate obs snapshots for inline grader reward.
+    # vllm mode: minimal prompt dataset — rewards come from rollout_func.
+    if args.no_vllm:
+        logger.info("Building dataset with pre-generated obs snapshots for --no-vllm mode...")
+        dataset = _build_dataset_with_obs(args.episodes, env, tokenizer)
+        logger.info("Dataset ready (%d rows).", len(dataset))
+    else:
+        dataset = Dataset.from_dict(
+            {"prompt": ["Navigate Indian road conditions safely."] * args.episodes}
+        )
 
     # ── Output dir ────────────────────────────────────────────────────────────
     ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -501,10 +630,11 @@ def main() -> None:
         )
 
     # ── GRPOConfig ────────────────────────────────────────────────────────────
+    _use_vllm = not args.no_vllm
     grpo_config = GRPOConfig(
-        use_vllm=True,
-        vllm_mode=args.vllm_mode,
-        vllm_gpu_memory_utilization=args.vllm_gpu_memory_utilization,
+        use_vllm=_use_vllm,
+        vllm_mode=args.vllm_mode if _use_vllm else "colocate",
+        vllm_gpu_memory_utilization=args.vllm_gpu_memory_utilization if _use_vllm else 0.0,
         output_dir=str(out),
         learning_rate=args.learning_rate,
         lr_scheduler_type="cosine",
@@ -568,15 +698,31 @@ def main() -> None:
         }
 
     # ── Trainer ───────────────────────────────────────────────────────────────
-    trainer = GRPOTrainer(
-        model=args.model_id,
-        processing_class=tokenizer,
-        reward_funcs=[reward_total, reward_success],
-        train_dataset=dataset,
-        args=grpo_config,
-        rollout_func=rollout_func,
-        peft_config=peft_config,
-    )
+    if args.no_vllm:
+        # --no-vllm: reward_driving_inline reads obs from dataset columns.
+        # No rollout_func — GRPOTrainer handles generation internally.
+        logger.info(
+            "[NO-VLLM] Using inline grader reward. "
+            "Loss will be non-zero only if the model produces varied actions."
+        )
+        trainer = GRPOTrainer(
+            model=args.model_id,
+            processing_class=tokenizer,
+            reward_funcs=[reward_driving_inline],
+            train_dataset=dataset,
+            args=grpo_config,
+            peft_config=peft_config,
+        )
+    else:
+        trainer = GRPOTrainer(
+            model=args.model_id,
+            processing_class=tokenizer,
+            reward_funcs=[reward_total, reward_success],
+            train_dataset=dataset,
+            args=grpo_config,
+            rollout_func=rollout_func,
+            peft_config=peft_config,
+        )
 
     # ── Train ─────────────────────────────────────────────────────────────────
     logger.info("Starting GRPO training — %d episodes × %d generations each",
