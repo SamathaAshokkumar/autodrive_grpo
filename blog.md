@@ -299,15 +299,6 @@ This is one of those problems where scaling up the model helps, but it doesn't *
 
 It's on the list for the next iteration.
 
-<!-- ---
-
-## Demo
-
-<!-- Replace with your actual video link -->
-🎥 **[Watch the system in action — add video link]**
-
---- -->
-
 ## Try It Yourself
 
 ```bash
