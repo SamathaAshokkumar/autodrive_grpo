@@ -462,7 +462,7 @@ The `MultiAgentPipeline` runs this chain for each action request. The result is 
 
 ### Results
 
-When two agents train together on the shared city route (`city_route` task), cooperation emerges around ambulance corridors and police overrides — scenarios where a single agent has a blind spot but the fleet does not. In our runs:
+When two agents train together on the shared city route (`city_route` task), cooperation emerges around ambulance corridors and police overrides — scenarios where a single agent has a blind spot but the fleet does not. In my runs:
 
 | Metric | Single agent | 2-agent fleet |
 |--------|-------------|---------------|
@@ -860,3 +860,12 @@ This means:
 - the episode still belongs to its original scenario
 - a secondary hazard was injected mid-episode
 - the agent is being evaluated on how it adapts mid-episode
+
+---
+
+## Links
+
+- 🎥 YouTube Demo: https://www.youtube.com/watch?v=34uUKTSyiYQ
+- 🤗 Hugging Face Space: https://huggingface.co/spaces/Samatha369/autodrive_grpo
+- 💻 GitHub Repo: https://github.com/SamathaAshokkumar/autodrive_grpo
+- 📊 WandB Training Runs: https://wandb.ai/samatha45102-scaler/autodrive-gym/runs/6wbcqovs?nw=nwusersamatha45102

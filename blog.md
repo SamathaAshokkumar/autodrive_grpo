@@ -34,13 +34,13 @@ And yet traffic flows beautifully.
 
 Modern AV systems aren't built for this. Every major benchmark — CARLA, Waymo, nuScenes — was designed for roads where predictability is the default. When I looked at the leaderboards, I noticed something: **nobody had solved this yet.**
 
-That's why we built AutoDrive Gym.
+That's why I built AutoDrive Gym.
 
 ---
 
-## What We Built
+## What I Built
 
-So we started with a simple question: **Can we build an environment that teaches an AI to think like that auto-rickshaw driver?**
+So I started with a simple question: **Can I build an environment that teaches an AI to think like that auto-rickshaw driver?**
 
 **AutoDrive Gym** is an OpenEnv-compatible reinforcement learning environment designed to train agents for exactly this:
 
@@ -63,7 +63,7 @@ POST /step     # send an action, get observation + reward
 GET  /grader   # score the agent on a specific task
 ```
 
-That's it. We wanted to remove barriers. No dependencies. No complex frameworks. Just observation → decision → reward.
+That's it. I wanted to remove barriers. No dependencies. No complex frameworks. Just observation → decision → reward.
 
 ---
 
@@ -71,13 +71,13 @@ That's it. We wanted to remove barriers. No dependencies. No complex frameworks.
 
 Here's where things got interesting.
 
-We trained our first agent. The metrics looked *perfect*:
+I trained my first agent. The metrics looked *perfect*:
 
 - ✅ High rewards
 - ✅ No crashes
 - ✅ Safe behavior
 
-We were ready to celebrate. And then we watched what the agent actually did.
+I was ready to celebrate. And then I watched what the agent actually did.
 
 It was near a hospital zone and it **never stopped braking**.
 
@@ -93,7 +93,7 @@ The agent had found a shortcut:
 
 This is not intelligence. This is pattern matching. It's what you get when you optimize for "safety" without forcing the agent to *think about context*.
 
-That moment, looking at the replay of a car braking at a hospital at 3am on an empty road, we realized **the real problem**. It wasn't about building an agent that never crashes. It was about building an agent that understands *why* it shouldn't crash — and when the rules don't apply.
+That moment, looking at the replay of a car braking at a hospital at 3am on an empty road, I realized **the real problem**. It wasn't about building an agent that never crashes. It was about building an agent that understands *why* it shouldn't crash — and when the rules don't apply.
 
 | Situation | What the agent learned | What it should learn |
 |---|---|---|
@@ -103,17 +103,17 @@ That moment, looking at the replay of a car braking at a hospital at 3am on an e
 
 Same environment. Completely different decisions. The difference is **reading the context**, not just the zone.
 
-We had to force the agent to actually reason. And that meant completely rethinking how we designed the training.
+I had to force the agent to actually reason. And that meant completely rethinking how I designed the training.
 
 ---
 
-## Breaking the Shortcut: How We Forced Reasoning
+## Breaking the Shortcut: How I Forced Reasoning
 
-We realized we couldn't just hope the agent would learn context. We had to **design for it explicitly**.
+I realized I couldn't just hope the agent would learn context. I had to **design for it explicitly**.
 
 ### Strategy 1: Ambiguous Scenarios
 
-The biggest insight was this: if braking is always safe, then the agent will always brake. So we built scenarios where:
+The biggest insight was this: if braking is always safe, then the agent will always brake. So I built scenarios where:
 
 - **Braking = wrong**
 - **Maintaining speed = correct**
@@ -126,7 +126,7 @@ The agent has to learn: "Zone presence alone doesn't mean brake. I need to read 
 
 Real driving changes. A green light doesn't stay green. A clear road doesn't stay clear.
 
-We designed episodes that shift mid-scenario:
+I designed episodes that shift mid-scenario:
 
 - **T=0:** Clear road → correct action is `accelerate`
 - **T=4:** Ambulance suddenly emerges from a driveway → correct action is `brake` and yield
@@ -141,7 +141,7 @@ After these interventions, the agent stopped over-braking. But more importantly,
 
 ## 30+ Real-World Scenarios: Teaching Judgment
 
-We built scenarios by watching actual traffic, noting the moments where human drivers had to make *judgment calls* — situations where the rules conflict, or context overrides the obvious answer.
+I built scenarios by watching actual traffic, noting the moments where human drivers had to make *judgment calls* — situations where the rules conflict, or context overrides the obvious answer.
 
 Here are some of them:
 
@@ -163,9 +163,9 @@ That's the gap AutoDrive Gym is trying to close.
 
 ## The Real Test: No Cheat Codes
 
-Here's the rule we gave ourselves: **Never tell the agent what zone it's in.**
+Here's the rule I gave myself: **Never tell the agent what zone it's in.**
 
-We didn't give it a label like `"zone_type": "hospital"`. We didn't create a feature called `is_sensitive_area`. That would be a shortcut — a cheat code that destroys the learning.
+I didn't give it a label like `"zone_type": "hospital"`. I didn't create a feature called `is_sensitive_area`. That would be a shortcut — a cheat code that destroys the learning.
 
 Instead, the agent sees what a human driver sees:
 
@@ -197,9 +197,9 @@ This is what separates pretending to be intelligent from actually being intellig
 
 ## Architecture: Teaching an AI to Think Like a Negotiator
 
-We knew that a simple neural network wouldn't cut it. You can't teach context-awareness with just convolutions and dense layers. You need *reasoning*.
+I knew that a simple neural network wouldn't cut it. You can't teach context-awareness with just convolutions and dense layers. You need *reasoning*.
 
-So we built a **multi-agent reasoning pipeline**: six specialized LLM sub-agents that collaborate on every single driving decision.
+So I built a **multi-agent reasoning pipeline**: six specialized LLM sub-agents that collaborate on every single driving decision.
 
 ```
 Observation → [Parsed Context] → [6 Agents Reason in Parallel] → [Oversight] → Action
@@ -225,9 +225,9 @@ A single monolithic network can't explain its reasoning. Six agents can. And mor
 
 ### The Q-Learning Speedup
 
-But here's the catch: LLM calls are slow and expensive. We can't run 72B parameters on a 1ms budget.
+But here's the catch: LLM calls are slow and expensive. I can't run 72B parameters on a 1ms budget.
 
-So we layer in a fast **Q-Learning policy** that memorizes the scenarios:
+So I layer in a fast **Q-Learning policy** that memorizes the scenarios:
 
 - Learns repeated patterns efficiently over episodes
 - Reduces reliance on expensive LLM calls for familiar situations
@@ -268,9 +268,9 @@ The Q-Learning layer picked up on the patterns so well that by episode 180, the 
 
 ---
 
-## The Problem We Couldn't Solve (Yet)
+## The Problem I Couldn't Solve (Yet)
 
-There's one scenario where our agent still stumbles.
+There's one scenario where my agent still stumbles.
 
 **A police officer is waving you through a red light.**
 
@@ -290,10 +290,10 @@ Humans answer this instantly. We recognize that a police officer at an intersect
 
 An AI has to *learn* that same hierarchy. And it's harder than it sounds.
 
-We tried:
+I tried:
 - Higher weight on police authority → but then it ignores signals even when there's no police
 - Temporal reasoning (who spoke most recently?) → but that's gaming the problem
-- Intent parsing (why is the police there?) → requires too much context we don't have
+- Intent parsing (why is the police there?) → requires too much context I don't have
 
 This is one of those problems where scaling up the model helps, but it doesn't *solve* it. The solution probably requires rethinking how we encode authority and human intent in the first place.
 
@@ -418,6 +418,7 @@ This is the future of autonomous driving research. Not just more compute. Not ju
 
 ## Links
 
+- 🎥 YouTube Demo: https://www.youtube.com/watch?v=34uUKTSyiYQ
 - 🤗 Hugging Face Space: https://huggingface.co/spaces/Samatha369/autodrive_grpo
 - 💻 GitHub Repo: https://github.com/SamathaAshokkumar/autodrive_grpo
 - 📊 WandB Training Runs: https://wandb.ai/samatha45102-scaler/autodrive-gym/runs/6wbcqovs?nw=nwusersamatha45102
