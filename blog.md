@@ -418,7 +418,7 @@ This is the future of autonomous driving research. Not just more compute. Not ju
 
 ## Links
 
-- 🎥 YouTube Demo: https://www.youtube.com/watch?v=34uUKTSyiYQ
+- 🎥 YouTube Demo: https://youtu.be/UAaQS-xngz8
 - 🤗 Hugging Face Space: https://huggingface.co/spaces/Samatha369/autodrive_grpo
 - 💻 GitHub Repo: https://github.com/SamathaAshokkumar/autodrive_grpo
 - 📊 WandB Training Runs: https://wandb.ai/samatha45102-scaler/autodrive-gym/runs/6wbcqovs?nw=nwusersamatha45102
