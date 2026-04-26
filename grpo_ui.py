@@ -532,25 +532,35 @@ def _run_episode(
     validation = obs.validation or {}
     collision  = int(bool(validation.get("collision")))
     near_miss  = int(bool(validation.get("near_miss")))
-    success    = bool(obs.done and total_reward > 0 and not collision)
+
+    # Normalise episode reward to (0.02, 0.98) — same contract as graders.py.
+    # Raw sum over 20 steps can reach ~20; averaging then clamping keeps it
+    # in range for consistent display in the UI and checkpoint comparisons.
+    n_steps = len(action_log)
+    if n_steps > 0:
+        normalised_reward = max(0.02, min(0.98, total_reward / n_steps))
+    else:
+        normalised_reward = 0.02
+
+    success = bool(obs.done and normalised_reward > 0.5 and not collision)
 
     if learner is not None:
         learner.record_validation(collision=bool(collision), near_miss=bool(near_miss))
-        learner.end_episode(success, total_reward, scenario_type)
+        learner.end_episode(success, normalised_reward, scenario_type)
 
     if VERBOSE_LOGGING:
         logger.info(
             "[EPISODE] ep=%d scenario=%s reward=%.3f success=%s collision=%s near_miss=%s steps=%d",
-            episode_num, scenario_type, total_reward, success,
-            bool(collision), bool(near_miss), len(action_log),
+            episode_num, scenario_type, normalised_reward, success,
+            bool(collision), bool(near_miss), n_steps,
         )
         if not success:
             logger.warning(
                 "[FAIL] ep=%d scenario=%s reward=%.3f collision=%s near_miss=%s",
-                episode_num, scenario_type, total_reward, bool(collision), bool(near_miss),
+                episode_num, scenario_type, normalised_reward, bool(collision), bool(near_miss),
             )
 
-    return total_reward, success, collision, near_miss, rule_violation, action_log, scenario_type
+    return normalised_reward, success, collision, near_miss, rule_violation, action_log, scenario_type
 
 
 # ---------------------------------------------------------------------------
